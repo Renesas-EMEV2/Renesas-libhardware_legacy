@@ -48,21 +48,50 @@ static char iface[PROPERTY_VALUE_MAX];
 // TODO: use new ANDROID_SOCKET mechanism, once support for multiple
 // sockets is in
 
+/* Wifi enabling - Following guide from
+    http://blog.linuxconsulting.ro/2010/04/porting-wifi-drivers-to-android.html
+*/
+#define BCM4329_4_218_248_15
+//#define BCM4329_4_218_248_6
+
+#ifdef BCM4329_4_218_248_15
+
 #ifndef WIFI_DRIVER_MODULE_PATH
-#define WIFI_DRIVER_MODULE_PATH         "/system/lib/modules/wlan.ko"
+#define WIFI_DRIVER_MODULE_PATH         "/lib/modules/dhd.ko"
+#endif
+#ifndef WIFI_DRIVER_MODULE_NAME
+#define WIFI_DRIVER_MODULE_NAME         "dhd"
+#endif
+#ifndef WIFI_DRIVER_MODULE_ARG
+#define WIFI_DRIVER_MODULE_ARG          "firmware_path=/system/etc/firmware/fw4329.bin \
+                                         nvram_path=/system/etc/firmware/4329_nvram.txt"
+#endif
+#ifndef WIFI_FIRMWARE_LOADER
+#define WIFI_FIRMWARE_LOADER		""
+#endif
+
+#else // BCM4329_4_218_248_6
+
+#ifndef WIFI_DRIVER_MODULE_PATH
+#define WIFI_DRIVER_MODULE_PATH         "/lib/modules/wlan.ko"
 #endif
 #ifndef WIFI_DRIVER_MODULE_NAME
 #define WIFI_DRIVER_MODULE_NAME         "wlan"
 #endif
 #ifndef WIFI_DRIVER_MODULE_ARG
-#define WIFI_DRIVER_MODULE_ARG          ""
+#define WIFI_DRIVER_MODULE_ARG          "firmware_path=/lib/modules/fw_bcm4329.bin \
+                                         nvram_path=/lib/modules/nvram.txt"
 #endif
 #ifndef WIFI_FIRMWARE_LOADER
 #define WIFI_FIRMWARE_LOADER		""
 #endif
+
+#endif
+
 #define WIFI_TEST_INTERFACE		"sta"
 
 #define WIFI_DRIVER_LOADER_DELAY	1000000
+#define WIFI_DRIVER_POWER_DELAY         1000000
 
 static const char IFACE_DIR[]           = "/data/system/wpa_supplicant";
 static const char DRIVER_MODULE_NAME[]  = WIFI_DRIVER_MODULE_NAME;
@@ -83,7 +112,6 @@ static int insmod(const char *filename, const char *args)
     unsigned int size;
     int ret;
 
-    module = load_file(filename, &size);
     if (!module)
         return -1;
 
@@ -166,6 +194,45 @@ static int check_driver_loaded() {
     return 0;
 }
 
+/* To be tested ...
+static int set_wifi_power(int on)
+{
+   FILE *fd;
+   char path[128];
+   char buf[128];
+   int id, rfkill_id;
+
+   for (id = 0; id<32 ; id++) {
+       snprintf(path, sizeof(path), "/sys/class/rfkill/rfkill%d/type", id);
+       fd = fopen(path, "r");
+       if (fd < 0) {
+           LOGE("Could not open %s", path);
+           return -1;
+       }
+       memset(buf, 0, sizeof(buf));
+       read(fd, &buf, sizeof(buf));
+       fclose(fd);
+       if (memcmp(buf, "wlan", 4) == 0) {
+           rfkill_id = id;
+           break;
+       }
+   }
+   sprintf(path, "/sys/class/rfkill/rfkill%d/state", rfkill_id);
+   fd=fopen(path,"rw");
+   if (fd < 0) {
+           LOGE("Could not open %s", path);
+           return -1;
+   }
+   if(on)
+       buf[0]="1";
+   else
+       buf[0]="0";
+   fwrite(buf,1,1,fd);
+   fclose(fd);
+   return 0;
+}
+*/
+
 int wifi_load_driver()
 {
     char driver_status[PROPERTY_VALUE_MAX];
@@ -175,8 +242,18 @@ int wifi_load_driver()
         return 0;
     }
 
-    if (insmod(DRIVER_MODULE_PATH, DRIVER_MODULE_ARG) < 0)
+/* To be tested ...
+    if (set_wifi_power(1) < 0 ) {
+	LOGE("Could not turn WiFi power ON");
+	return -1;
+    }
+    usleep(WIFI_DRIVER_POWER_DELAY);
+*/
+
+    if (insmod(DRIVER_MODULE_PATH, DRIVER_MODULE_ARG) < 0) {
+	LOGE("Could not 'insmod' WiFi drifer");
         return -1;
+    }
 
     if (strcmp(FIRMWARE_LOADER,"") == 0) {
         usleep(WIFI_DRIVER_LOADER_DELAY);
@@ -191,6 +268,7 @@ int wifi_load_driver()
             if (strcmp(driver_status, "ok") == 0)
                 return 0;
             else if (strcmp(DRIVER_PROP_NAME, "failed") == 0) {
+		LOGE("Failed driver status");
                 wifi_unload_driver();
                 return -1;
             }
@@ -213,11 +291,21 @@ int wifi_unload_driver()
     	    usleep(500000);
 	}
 	if (count) {
+/* To be tested ...
+            if (set_wifi_power(0) < 0) {
+	       LOGE("Could not turn WiFi power OFF");
+               return -1;
+	    }
+*/
     	    return 0;
 	}
+	LOGE("Could not 'rmmod' WiFi driver after 20 trials");
 	return -1;
-    } else
+    } else {
+	LOGE("Could not 'rmmod' WiFi driver at first trial");
         return -1;
+    }
+    return 0;
 }
 
 int ensure_config_file_exists()
