@@ -63,8 +63,7 @@ static char iface[PROPERTY_VALUE_MAX];
 #define WIFI_DRIVER_MODULE_NAME         "dhd"
 #endif
 #ifndef WIFI_DRIVER_MODULE_ARG
-#define WIFI_DRIVER_MODULE_ARG          "firmware_path=/system/etc/firmware/fw4329.bin \
-                                         nvram_path=/system/etc/firmware/4329_nvram.txt"
+#define WIFI_DRIVER_MODULE_ARG          "firmware_path=/system/etc/firmware/fw4329.bin nvram_path=/system/etc/firmware/4329_nvram.txt"
 #endif
 #ifndef WIFI_FIRMWARE_LOADER
 #define WIFI_FIRMWARE_LOADER		""
@@ -79,8 +78,7 @@ static char iface[PROPERTY_VALUE_MAX];
 #define WIFI_DRIVER_MODULE_NAME         "wlan"
 #endif
 #ifndef WIFI_DRIVER_MODULE_ARG
-#define WIFI_DRIVER_MODULE_ARG          "firmware_path=/lib/modules/fw_bcm4329.bin \
-                                         nvram_path=/lib/modules/nvram.txt"
+#define WIFI_DRIVER_MODULE_ARG          "firmware_path=/lib/modules/fw_bcm4329.bin nvram_path=/lib/modules/nvram.txt"
 #endif
 #ifndef WIFI_FIRMWARE_LOADER
 #define WIFI_FIRMWARE_LOADER		""
@@ -91,7 +89,7 @@ static char iface[PROPERTY_VALUE_MAX];
 #define WIFI_TEST_INTERFACE		"sta"
 
 #define WIFI_DRIVER_LOADER_DELAY	1000000
-#define WIFI_DRIVER_POWER_DELAY         1000000
+#define WIFI_DRIVER_POWER_DELAY         3000000
 
 static const char IFACE_DIR[]           = "/data/system/wpa_supplicant";
 static const char DRIVER_MODULE_NAME[]  = WIFI_DRIVER_MODULE_NAME;
@@ -112,12 +110,17 @@ static int insmod(const char *filename, const char *args)
     unsigned int size;
     int ret;
 
-    if (!module)
+    module = load_file(filename, &size);
+    if (!module){
+	LOGE ("failed load_file '%s'", filename);
         return -1;
-
+    }
+	
+    LOGD ("init_module : %x %d", module, size);
     ret = init_module(module, size, args);
-
     free(module);
+    if (ret<0)
+        LOGE ("failed init_module %d (%d)", size, ret);
 
     return ret;
 }
@@ -136,7 +139,7 @@ static int rmmod(const char *modname)
     }
 
     if (ret != 0)
-        LOGD("Unable to unload driver module \"%s\": %s\n",
+        LOGE("Unable to unload driver module \"%s\": %s\n",
              modname, strerror(errno));
     return ret;
 }
@@ -171,15 +174,10 @@ static int check_driver_loaded() {
     if (!property_get(DRIVER_PROP_NAME, driver_status, NULL)
             || strcmp(driver_status, "ok") != 0) {
         return 0;  /* driver not loaded */
-    }
-    /*
-     * If the property says the driver is loaded, check to
-     * make sure that the property setting isn't just left
-     * over from a previous manual shutdown or a runtime
-     * crash.
-     */
+    } 
+
     if ((proc = fopen(MODULE_FILE, "r")) == NULL) {
-        LOGW("Could not open %s: %s", MODULE_FILE, strerror(errno));
+        LOGE("Could not open %s: %s", MODULE_FILE, strerror(errno));
         property_set(DRIVER_PROP_NAME, "unloaded");
         return 0;
     }
@@ -194,45 +192,6 @@ static int check_driver_loaded() {
     return 0;
 }
 
-/* To be tested ...
-static int set_wifi_power(int on)
-{
-   FILE *fd;
-   char path[128];
-   char buf[128];
-   int id, rfkill_id;
-
-   for (id = 0; id<32 ; id++) {
-       snprintf(path, sizeof(path), "/sys/class/rfkill/rfkill%d/type", id);
-       fd = fopen(path, "r");
-       if (fd < 0) {
-           LOGE("Could not open %s", path);
-           return -1;
-       }
-       memset(buf, 0, sizeof(buf));
-       read(fd, &buf, sizeof(buf));
-       fclose(fd);
-       if (memcmp(buf, "wlan", 4) == 0) {
-           rfkill_id = id;
-           break;
-       }
-   }
-   sprintf(path, "/sys/class/rfkill/rfkill%d/state", rfkill_id);
-   fd=fopen(path,"rw");
-   if (fd < 0) {
-           LOGE("Could not open %s", path);
-           return -1;
-   }
-   if(on)
-       buf[0]="1";
-   else
-       buf[0]="0";
-   fwrite(buf,1,1,fd);
-   fclose(fd);
-   return 0;
-}
-*/
-
 int wifi_load_driver()
 {
     char driver_status[PROPERTY_VALUE_MAX];
@@ -242,18 +201,9 @@ int wifi_load_driver()
         return 0;
     }
 
-/* To be tested ...
-    if (set_wifi_power(1) < 0 ) {
-	LOGE("Could not turn WiFi power ON");
+    LOGD("insmod: '%s' args: '%s'", DRIVER_MODULE_PATH, DRIVER_MODULE_ARG);
+    if (insmod(DRIVER_MODULE_PATH, DRIVER_MODULE_ARG) < 0) 
 	return -1;
-    }
-    usleep(WIFI_DRIVER_POWER_DELAY);
-*/
-
-    if (insmod(DRIVER_MODULE_PATH, DRIVER_MODULE_ARG) < 0) {
-	LOGE("Could not 'insmod' WiFi drifer");
-        return -1;
-    }
 
     if (strcmp(FIRMWARE_LOADER,"") == 0) {
         usleep(WIFI_DRIVER_LOADER_DELAY);
@@ -265,15 +215,17 @@ int wifi_load_driver()
     sched_yield();
     while (count-- > 0) {
         if (property_get(DRIVER_PROP_NAME, driver_status, NULL)) {
-            if (strcmp(driver_status, "ok") == 0)
+            if (strcmp(driver_status, "ok") == 0){
+                LOGI("Wifi driver loaded");
                 return 0;
+            }
             else if (strcmp(DRIVER_PROP_NAME, "failed") == 0) {
 		LOGE("Failed driver status");
                 wifi_unload_driver();
                 return -1;
             }
         }
-        usleep(200000);
+        usleep(WIFI_DRIVER_LOADER_DELAY);
     }
     property_set(DRIVER_PROP_NAME, "timeout");
     wifi_unload_driver();
@@ -291,11 +243,12 @@ int wifi_unload_driver()
     	    usleep(500000);
 	}
 	if (count) {
-/* To be tested ...
-            if (set_wifi_power(0) < 0) {
+/* This isn't needed, as driver should include power handling
+            if (set_wifi_power(1) < 0) {
 	       LOGE("Could not turn WiFi power OFF");
                return -1;
 	    }
+            LOGI("WiFi power OFF");
 */
     	    return 0;
 	}
