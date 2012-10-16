@@ -27,6 +27,7 @@
 #include "libwpa_client/wpa_ctrl.h"
 
 #define LOG_TAG "WifiHW"
+
 #include "cutils/log.h"
 #include "cutils/memory.h"
 #include "cutils/misc.h"
@@ -64,14 +65,19 @@ extern int delete_module(const char *, unsigned int);
 static char primary_iface[PROPERTY_VALUE_MAX];
 // TODO: use new ANDROID_SOCKET mechanism, once support for multiple
 // sockets is in
-
+#ifndef WIFI_DRIVER_MODULE_NAME
+#define WIFI_DRIVER_MODULE_NAME	"dhd"
+#endif
+#ifndef WIFI_DRIVER_MODULE_PATH
+#define WIFI_DRIVER_MODULE_PATH         "/system/lib/modules/dhd.ko"
+#endif
 #ifndef WIFI_DRIVER_MODULE_ARG
-#define WIFI_DRIVER_MODULE_ARG          ""
+#define WIFI_DRIVER_MODULE_ARG          "firmware_path=/system/etc/firmware/fw4329.bin nvram_path=/system/etc/firmware/4329_nvram.txt"
 #endif
 #ifndef WIFI_FIRMWARE_LOADER
 #define WIFI_FIRMWARE_LOADER		""
 #endif
-#define WIFI_TEST_INTERFACE		"sta"
+#define WIFI_TEST_INTERFACE		"eth0"
 
 #ifndef WIFI_DRIVER_FW_PATH_STA
 #define WIFI_DRIVER_FW_PATH_STA		NULL
@@ -89,7 +95,9 @@ static char primary_iface[PROPERTY_VALUE_MAX];
 
 #define WIFI_DRIVER_LOADER_DELAY	1000000
 
-static const char IFACE_DIR[]           = "/data/system/wpa_supplicant";
+/* #define EMEV_WIFI_POWERHANDLING */
+
+static const char IFACE_DIR[]           = "/data/misc/wifi/wpa_supplicant";
 #ifdef WIFI_DRIVER_MODULE_PATH
 static const char DRIVER_MODULE_NAME[]  = WIFI_DRIVER_MODULE_NAME;
 static const char DRIVER_MODULE_TAG[]   = WIFI_DRIVER_MODULE_NAME " ";
@@ -137,7 +145,10 @@ static int insmod(const char *filename, const char *args)
 
     module = load_file(filename, &size);
     if (!module)
+    {
+	ALOGE("load_file %s failed", filename);
         return -1;
+    }
 
     ret = init_module(module, size, args);
 
@@ -160,7 +171,7 @@ static int rmmod(const char *modname)
     }
 
     if (ret != 0)
-        ALOGD("Unable to unload driver module \"%s\": %s\n",
+        ALOGE("Unable to unload driver module \"%s\": %s\n",
              modname, strerror(errno));
     return ret;
 }
@@ -187,12 +198,117 @@ const char *get_dhcp_error_string() {
     return dhcp_lasterror();
 }
 
+#ifdef EMEV_WIFI_POWERHANDLING
+/* Wifi dongle power handling for Renesas EMEV boards */
+static int rfkill_id = -1;
+static char *rfkill_state_path = NULL;
+static int init_rfkill() {
+    char path[64];
+    char buf[16];
+    int fd;
+    int sz;
+    int id;
+
+    for (id = 0; ; id++) {
+        snprintf(path, sizeof(path), "/sys/class/rfkill/rfkill%d/type", id);
+        fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            ALOGW("open(%s) failed: %s (%d)\n", path, strerror(errno), errno);
+            return -1;
+        }
+        sz = read(fd, &buf, sizeof(buf));
+        close(fd);
+        if (sz >= 4 && memcmp(buf, "wlan", 4) == 0) {
+            rfkill_id = id;
+            break;
+        }
+    }
+
+    asprintf(&rfkill_state_path, "/sys/class/rfkill/rfkill%d/state", rfkill_id);
+    return 0;
+}
+
+static int check_wifi_power() {
+    int sz;
+    int fd = -1;
+    int ret = -1;
+    char buffer;
+
+    if (rfkill_id == -1) {
+        if (init_rfkill()) goto out;
+    }
+
+    fd = open(rfkill_state_path, O_RDONLY);
+    if (fd < 0) {
+        ALOGE("open(%s) failed: %s (%d)", rfkill_state_path, strerror(errno),
+             errno);
+        goto out;
+    }
+    sz = read(fd, &buffer, 1);
+    if (sz != 1) {
+        ALOGE("read(%s) failed: %s (%d)", rfkill_state_path, strerror(errno),
+             errno);
+        goto out;
+    }
+
+    switch (buffer) {
+    case '1':
+        ret = 1;
+        break;
+    case '0':
+        ret = 0;
+        break;
+    }
+
+out:
+    if (fd >= 0) close(fd);
+    return ret;
+}
+
+static int set_wifi_power(int on) {
+    int sz;
+    int fd = -1;
+    int ret = -1;
+    const char buffer = (on ? '1' : '0');
+
+    if (rfkill_id == -1) {
+        if (init_rfkill()) goto out;
+    }
+    ALOGD("Setting WiFi power 'rfkill' status to %c", buffer);
+    fd = open(rfkill_state_path, O_WRONLY);
+    if (fd < 0) {
+        ALOGE("open(%s) for write failed: %s (%d)", rfkill_state_path,
+             strerror(errno), errno);
+        goto out;
+    }
+    sz = write(fd, &buffer, 1);
+    if (sz < 0) {
+        ALOGE("write(%s) failed: %s (%d)", rfkill_state_path, strerror(errno),
+             errno);
+        goto out;
+    }
+    ret = 0;
+    ALOGD("WiFi power 'rfkill' status set to %c", buffer);
+out:
+    if (fd >= 0) close(fd);
+    return ret;
+}
+#endif /* EMEV_WIFI_POWERHANDLING */
+
 int is_wifi_driver_loaded() {
     char driver_status[PROPERTY_VALUE_MAX];
 #ifdef WIFI_DRIVER_MODULE_PATH
     FILE *proc;
     char line[sizeof(DRIVER_MODULE_TAG)+10];
 #endif
+    int ret = -1;
+
+#ifdef EMEV_WIFI_POWERHANDLING */
+    // Check power first
+    ret = check_wifi_power();
+        if (ret == -1 || ret == 0) 
+            return 0;
+#endif /* EMEV_WIFI_POWERHANDLING */
 
     if (!property_get(DRIVER_PROP_NAME, driver_status, NULL)
             || strcmp(driver_status, "ok") != 0) {
@@ -234,6 +350,15 @@ int wifi_load_driver()
         return 0;
     }
 
+#ifdef EMEV_WIFI_POWERHANDLING
+    if (set_wifi_power(1) < 0 ) {
+        ALOGE("Could not turn WiFi power ON");
+        return -1;
+    }
+    usleep(200000);
+#endif /* EMEV_WIFI_POWERHANDLING */
+
+    ALOGD("Loading driver: %s %s", DRIVER_MODULE_PATH, DRIVER_MODULE_ARG);
     if (insmod(DRIVER_MODULE_PATH, DRIVER_MODULE_ARG) < 0)
         return -1;
 
@@ -277,7 +402,14 @@ int wifi_unload_driver()
             usleep(500000);
         }
         usleep(500000); /* allow card removal */
+
         if (count) {
+#ifdef EMEV_WIFI_POWERHANDLING
+	    if (set_wifi_power(0) < 0) {
+                   ALOGE("Could not turn WiFi power OFF");
+                   return -1;
+            }
+#endif /* EMEV_WIFI_POWERHANDLING */
             return 0;
         }
         return -1;
