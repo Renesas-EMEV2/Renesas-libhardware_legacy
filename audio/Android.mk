@@ -7,8 +7,7 @@ LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES := \
-    AudioHardwareInterface.cpp \
-    audio_hw_hal.cpp
+    AudioHardwareInterface.cpp
 
 LOCAL_MODULE := libaudiohw_legacy
 LOCAL_MODULE_TAGS := optional
